@@ -4,6 +4,7 @@ import (
 	"CS2VoiceData/decoder"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"strconv"
 
@@ -42,7 +43,7 @@ func main() {
 
 	// For each users data, create a wav file containing their voice comms.
 	for playerId, voiceData := range voiceDataPerPlayer {
-		wavFilePath := fmt.Sprintf("%s.wav", playerId)
+		wavFilePath := fmt.Sprintf("output/%s.wav", playerId)
 		if format == "VOICEDATA_FORMAT_OPUS" {
 			err = opusToWav(voiceData, wavFilePath)
 			if err != nil {
