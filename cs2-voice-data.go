@@ -84,7 +84,7 @@ func main() {
 	// Add a parser register for the VoiceData net message.
 	parser.RegisterNetMessageHandler(func(m *msgs2.CSVCMsg_VoiceData) {
 		// Print tick. m.Tick/GetTick always return 0 for this net msg
-		slog.Info("CSVCMsg_VoiceData", "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "Samples", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
+		slog.Info("CSVCMsg_VoiceData", "Frame", parser.CurrentFrame(), "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "BytesEncoded", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
 
 		// Get the users Steam ID 64.
 		steamId := strconv.Itoa(int(m.GetXuid()))
