@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
@@ -14,6 +15,8 @@ import (
 )
 
 func main() {
+	startTime := time.Now()
+
 	outDir := "output"
 	os.MkdirAll(outDir, 0755)
 
@@ -30,6 +33,7 @@ func main() {
 			}
 			return slog.Attr{Key: a.Key, Value: a.Value}
 		},
+		Level: slog.LevelWarn,
 	}))
 	slog.SetDefault(logger)
 
@@ -71,14 +75,15 @@ func main() {
 
 	// ParseHeader is deprecated (see https://github.com/markus-wa/demoinfocs-golang/discussions/568)
 	// header, err := parser.ParseHeader()
-	// fmt.Printf("Demo framerate: %f (Server tickrate: 64)\n", header.FrameRate())
 
 	// Parse the full demo file.
-	// err = parser.ParseToEnd()
-	var moreFrames bool = true
-	for moreFrames {
-		moreFrames, err = parser.ParseNextFrame()
-	}
+	err = parser.ParseToEnd()
+	// var moreFrames bool = true
+	// for moreFrames {
+	// 	moreFrames, err = parser.ParseNextFrame()
+	// }
+	elapsed := time.Since(startTime)
+	slog.Warn(fmt.Sprintf("Time elapsed: %v", elapsed))
 
 	// For each users data, create a wav file containing their voice comms.
 	for playerId, voiceData := range voiceDataPerPlayer {
