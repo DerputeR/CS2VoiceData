@@ -1,0 +1,1 @@
+rm -r ./output; go run cs2-voice-data.go; ./log
