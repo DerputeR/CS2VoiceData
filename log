@@ -1,4 +1,4 @@
 #/bin/bash
 
-hl log.log --hide 'Audio.UncompressedSampleOffset' --hide 'Mask' --hide 'Proximity' --hide 'Passthrough' --hide 'Audio.SampleRate' --hide 'Audio.NumPackets' --hide 'Audio.SequenceBytes'
+LESS="+G" hl log.log --hide 'Audio.UncompressedSampleOffset' --hide 'Mask' --hide 'Proximity' --hide 'Passthrough' --hide 'Audio.SampleRate' --hide 'Audio.NumPackets' --hide 'Audio.SequenceBytes'
 
