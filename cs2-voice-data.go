@@ -2,6 +2,7 @@ package main
 
 import (
 	"CS2VoiceData/decoder"
+	"bufio"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,25 +22,44 @@ func main() {
 	os.MkdirAll(outDir, 0755)
 
 	logFile, err := os.Create("log.log")
+	// default buffer size is 4096
+	// 32768 seems optimal for my machine when log level is INFO
+	bufSize := 4096
+	if len(os.Args) == 2 {
+		bufSize, err = strconv.Atoi(os.Args[1])
+		if err != nil {
+			bufSize = 4096
+		}
+	}
+	logWriter := bufio.NewWriterSize(logFile, bufSize)
+	defer func() {
+		logWriter.Flush()
+		logFile.Close()
+	}()
+
 	if err != nil {
 		slog.Error("Unable to create JSON log file!", "error", err)
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(logFile, &slog.HandlerOptions{
+	logger := slog.New(slog.NewJSONHandler(logWriter, &slog.HandlerOptions{
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == "time" {
 				return slog.Attr{}
 			}
 			return slog.Attr{Key: a.Key, Value: a.Value}
 		},
-		Level: slog.LevelWarn,
+		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 
-	// Create a map of a users to voice data.
+	// Create a map of a user's steamid to voice data.
 	// Each chunk of voice data is a slice of bytes, store all those slices in a grouped slice.
 	var voiceDataPerPlayer = map[string][][]byte{}
+
+	// Create a map of a user's steamid to the last frame voice data was found in
+	// This is done so we can keep track of silence and insert blank bytes accordingly
+	var lastVoiceDataFramePerPlayer = map[string]int{}
 
 	// The file path to an unzipped demo file.
 	file, err := os.Open("1-34428882-6181-4c75-a24b-4982764122e2.dem")
@@ -63,14 +83,27 @@ func main() {
 
 	// Add a parser register for the VoiceData net message.
 	parser.RegisterNetMessageHandler(func(m *msgs2.CSVCMsg_VoiceData) {
-		// print tick. m.Tick/GetTick always return 0 for this net msg
+		// Print tick. m.Tick/GetTick always return 0 for this net msg
 		slog.Info("CSVCMsg_VoiceData", "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "Samples", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
 
 		// Get the users Steam ID 64.
 		steamId := strconv.Itoa(int(m.GetXuid()))
+
+		// Check if there should be silence before this voice data
+		currentFrame := parser.CurrentFrame()
+		lastVoiceDataFrame := lastVoiceDataFramePerPlayer[steamId]
+		frameDiff := currentFrame - lastVoiceDataFrame
+		if frameDiff > 1 {
+			// Add silence
+			slog.Info("Silence", "FrameDuration", frameDiff)
+		}
+
 		// Append voice data to map
 		format = m.Audio.Format.String()
 		voiceDataPerPlayer[steamId] = append(voiceDataPerPlayer[steamId], m.Audio.VoiceData)
+
+		// Record frame number
+		lastVoiceDataFramePerPlayer[steamId] = currentFrame
 	})
 
 	// ParseHeader is deprecated (see https://github.com/markus-wa/demoinfocs-golang/discussions/568)
