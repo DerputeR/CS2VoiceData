@@ -3,6 +3,7 @@ package main
 import (
 	"CS2VoiceData/decoder"
 	"bufio"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,13 +16,32 @@ import (
 	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/msgs2"
 )
 
+type FramedSlice[T any] struct {
+	frame int
+	data  []T
+}
+
+type FrameAudioInfo struct {
+	frame   int
+	samples int
+}
+
+// default is 750 = 48000 hz / 64 fps
+var samplesPerFrame int = 750
+
+var logLevel slog.Level = slog.LevelInfo
+
 func main() {
 	startTime := time.Now()
 
 	outDir := "output"
 	os.MkdirAll(outDir, 0755)
 
+	var err error
 	logFile, err := os.Create("log.log")
+	if err != nil {
+		logFile = os.Stdout
+	}
 	// default buffer size is 4096
 	// 32768 seems optimal for my machine when log level is INFO
 	bufSize := 4096
@@ -37,11 +57,6 @@ func main() {
 		logFile.Close()
 	}()
 
-	if err != nil {
-		slog.Error("Unable to create JSON log file!", "error", err)
-		os.Exit(1)
-	}
-
 	logger := slog.New(slog.NewJSONHandler(logWriter, &slog.HandlerOptions{
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == "time" {
@@ -49,17 +64,12 @@ func main() {
 			}
 			return slog.Attr{Key: a.Key, Value: a.Value}
 		},
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	}))
 	slog.SetDefault(logger)
 
-	// Create a map of a user's steamid to voice data.
-	// Each chunk of voice data is a slice of bytes, store all those slices in a grouped slice.
-	var voiceDataPerPlayer = map[string][][]byte{}
-
-	// Create a map of a user's steamid to the last frame voice data was found in
-	// This is done so we can keep track of silence and insert blank bytes accordingly
-	var lastVoiceDataFramePerPlayer = map[string]int{}
+	// Create a map of a user's steamid64 to voice data.
+	var rawAudioMap = map[uint64][]FramedSlice[byte]{}
 
 	// The file path to an unzipped demo file.
 	file, err := os.Open("1-34428882-6181-4c75-a24b-4982764122e2.dem")
@@ -87,23 +97,14 @@ func main() {
 		slog.Info("CSVCMsg_VoiceData", "Frame", parser.CurrentFrame(), "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "BytesEncoded", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
 
 		// Get the users Steam ID 64.
-		steamId := strconv.Itoa(int(m.GetXuid()))
-
-		// Check if there should be silence before this voice data
-		currentFrame := parser.CurrentFrame()
-		lastVoiceDataFrame := lastVoiceDataFramePerPlayer[steamId]
-		frameDiff := currentFrame - lastVoiceDataFrame
-		if frameDiff > 1 {
-			// Add silence
-			slog.Info("Silence", "FrameDuration", frameDiff)
-		}
+		steamId := m.GetXuid()
 
 		// Append voice data to map
+		// todo: find out of it's possible this can be different per player
 		format = m.Audio.Format.String()
-		voiceDataPerPlayer[steamId] = append(voiceDataPerPlayer[steamId], m.Audio.VoiceData)
-
-		// Record frame number
-		lastVoiceDataFramePerPlayer[steamId] = currentFrame
+		// todo: find out if we should sync against server tick (parser.GameState().IngameTick()) or against demo frame
+		currentFrame := parser.CurrentFrame()
+		rawAudioMap[steamId] = append(rawAudioMap[steamId], FramedSlice[byte]{frame: currentFrame, data: m.Audio.VoiceData})
 	})
 
 	// ParseHeader is deprecated (see https://github.com/markus-wa/demoinfocs-golang/discussions/568)
@@ -119,17 +120,37 @@ func main() {
 	slog.Warn(fmt.Sprintf("Time elapsed: %v", elapsed))
 
 	// For each users data, create a wav file containing their voice comms.
-	for playerId, voiceData := range voiceDataPerPlayer {
-		wavFilePath := fmt.Sprintf("%s/%s.wav", outDir, playerId)
+	for playerId, voiceData := range rawAudioMap {
+		wavFilePath := fmt.Sprintf("%s/%d.wav", outDir, playerId)
 		if format == "VOICEDATA_FORMAT_OPUS" {
-			err = opusToWav(voiceData, wavFilePath)
+			pcm, err := opusToPcm(rawAudioMap[playerId])
 			if err != nil {
 				slog.Warn(err.Error())
 				continue
 			}
 
+			err = writePcmToFile(pcm, wavFilePath)
+			if err != nil {
+				slog.Warn(err.Error())
+				continue
+			}
+
+			// err = opusToWav(voiceData, wavFilePath)
+			// if err != nil {
+			// 	slog.Warn(err.Error())
+			// 	continue
+			// }
+
 		} else if format == "VOICEDATA_FORMAT_STEAM" {
-			convertAudioDataToWavFiles(voiceData, wavFilePath)
+			// TODO
+			slog.Warn("WARNING: Steam Audio has not been updated to add silence.")
+			var voiceBytes [][]byte
+			for _, d := range voiceData {
+				voiceBytes = append(voiceBytes, d.data)
+			}
+			convertAudioDataToWavFiles(voiceBytes, wavFilePath)
+		} else {
+			slog.Warn("WARNING: Unknown audio encoding", "format", format)
 		}
 	}
 
@@ -244,5 +265,89 @@ func opusToWav(data [][]byte, wavName string) (err error) {
 		return
 	}
 
+	return
+}
+
+// todo
+func opusToPcm(frameData []FramedSlice[byte]) (pcmData []FramedSlice[int], err error) {
+	opusDecoder, err := decoder.NewDecoder(48000, 1)
+	if err != nil {
+		return
+	}
+
+	latestFrameAudioInfo := FrameAudioInfo{frame: 0, samples: 0}
+	var longestFrameDuration int = 0
+
+	for _, d := range frameData {
+
+		pcm, err := decoder.Decode(opusDecoder, d.data)
+		if err != nil {
+			slog.Warn(err.Error())
+			continue
+		}
+
+		// ? should this be int32
+		pcmIntBuf := make([]int, len(pcm))
+
+		for i, p := range pcm {
+			// todo: use the go-audio transforms instead of manually mangling the samples up to int samples
+			pcmIntBuf[i] = int(p * 2147483647)
+		}
+
+		fDiff := d.frame - latestFrameAudioInfo.frame
+		if fDiff == 0 {
+			latestFrameAudioInfo.samples += len(d.data)
+		} else if fDiff == 1 {
+			longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
+			latestFrameAudioInfo.frame = d.frame
+			latestFrameAudioInfo.samples = len(d.data)
+		} else if fDiff > 1 {
+			// todo: insert silence
+			// todo: figure out how to precisely calculate this. we can use ints for now
+			slog.Info(fmt.Sprintf("Silence found between %d (len: %d samples) and %d - calculated duration: %d samples", latestFrameAudioInfo.frame, latestFrameAudioInfo.samples, d.frame, (samplesPerFrame-latestFrameAudioInfo.samples)+(samplesPerFrame*fDiff)))
+
+			longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
+			latestFrameAudioInfo.frame = d.frame
+			latestFrameAudioInfo.samples = len(d.data)
+		} else {
+			// should not happen...
+			slog.Error("Error: Demo audio packet out of order!", "PacketFrame", d.frame, "PacketLen", len(d.data), "LastPacketFrame", latestFrameAudioInfo.frame, "LastPacketLen", latestFrameAudioInfo.samples)
+			return pcmData, errors.New("demo audio packet out of order")
+		}
+
+		longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
+		pcmData = append(pcmData, FramedSlice[int]{d.frame, pcmIntBuf})
+	}
+	slog.Info("PCM info", "LongestFrameDuration", longestFrameDuration)
+	return
+}
+
+func writePcmToFile(pcmData []FramedSlice[int], wavName string) (err error) {
+	file, err := os.Create(wavName)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	enc := wav.NewEncoder(file, 48000, 32, 1, 1)
+	defer enc.Close()
+
+	var pcmBuffer []int
+	for _, d := range pcmData {
+		pcmBuffer = append(pcmBuffer, d.data...)
+	}
+
+	buffer := &audio.IntBuffer{
+		Data: pcmBuffer,
+		Format: &audio.Format{
+			SampleRate:  48000,
+			NumChannels: 1,
+		},
+	}
+
+	err = enc.Write(buffer)
+	if err != nil {
+		return
+	}
 	return
 }
