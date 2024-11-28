@@ -17,11 +17,13 @@ import (
 )
 
 type FramedSlice[T any] struct {
+	id    uint64
 	frame int
 	data  []T
 }
 
 type FrameAudioInfo struct {
+	id      uint64
 	frame   int
 	samples int
 }
@@ -104,7 +106,8 @@ func main() {
 		format = m.Audio.Format.String()
 		// todo: find out if we should sync against server tick (parser.GameState().IngameTick()) or against demo frame
 		currentFrame := parser.CurrentFrame()
-		rawAudioMap[steamId] = append(rawAudioMap[steamId], FramedSlice[byte]{frame: currentFrame, data: m.Audio.VoiceData})
+		// currentFrame := parser.GameState().IngameTick()
+		rawAudioMap[steamId] = append(rawAudioMap[steamId], FramedSlice[byte]{id: steamId, frame: currentFrame, data: m.Audio.VoiceData})
 	})
 
 	// ParseHeader is deprecated (see https://github.com/markus-wa/demoinfocs-golang/discussions/568)
@@ -150,7 +153,7 @@ func main() {
 			}
 			convertAudioDataToWavFiles(voiceBytes, wavFilePath)
 		} else {
-			slog.Warn("WARNING: Unknown audio encoding", "format", format)
+			slog.Warn("WARNING: Unknown audio encoding", "steamid", playerId, "format", format)
 		}
 	}
 
@@ -295,30 +298,37 @@ func opusToPcm(frameData []FramedSlice[byte]) (pcmData []FramedSlice[int], err e
 		}
 
 		fDiff := d.frame - latestFrameAudioInfo.frame
+		longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
 		if fDiff == 0 {
-			latestFrameAudioInfo.samples += len(d.data)
+			latestFrameAudioInfo.samples += len(pcmIntBuf)
 		} else if fDiff == 1 {
-			longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
+			slog.Info("Frame stats", "Frame", latestFrameAudioInfo.frame, "Samples", latestFrameAudioInfo.samples, "steamid", d.id)
 			latestFrameAudioInfo.frame = d.frame
-			latestFrameAudioInfo.samples = len(d.data)
-		} else if fDiff > 1 {
-			// todo: insert silence
-			// todo: figure out how to precisely calculate this. we can use ints for now
-			slog.Info(fmt.Sprintf("Silence found between %d (len: %d samples) and %d - calculated duration: %d samples", latestFrameAudioInfo.frame, latestFrameAudioInfo.samples, d.frame, (samplesPerFrame-latestFrameAudioInfo.samples)+(samplesPerFrame*fDiff)))
+			latestFrameAudioInfo.samples = len(pcmIntBuf)
 
-			longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
+		} else if fDiff > 1 {
+			slog.Info("Frame stats", "Frame", latestFrameAudioInfo.frame, "Samples", latestFrameAudioInfo.samples, "steamid", d.id)
+			// todo: insert silence
+			// this is just temporary
+			calculatedSilence := max(0, (samplesPerFrame-latestFrameAudioInfo.samples)+(samplesPerFrame*(fDiff-1)))
+
+			// pcmData = append(pcmData, FramedSlice[int]{id: d.id, frame: latestFrameAudioInfo.frame + 1, data: make([]int, 10)})
+
+			// todo: figure out how to precisely calculate this. we can use ints for now
+			slog.Info(fmt.Sprintf("Silence found between %d (len: %d samples) and %d - calculated duration: %d samples", latestFrameAudioInfo.frame, latestFrameAudioInfo.samples, d.frame, calculatedSilence), "steamid", d.id)
+
 			latestFrameAudioInfo.frame = d.frame
-			latestFrameAudioInfo.samples = len(d.data)
+			latestFrameAudioInfo.samples = len(pcmIntBuf)
 		} else {
 			// should not happen...
-			slog.Error("Error: Demo audio packet out of order!", "PacketFrame", d.frame, "PacketLen", len(d.data), "LastPacketFrame", latestFrameAudioInfo.frame, "LastPacketLen", latestFrameAudioInfo.samples)
+			slog.Error("Error: Demo audio packet out of order!", "steamid", d.id, "PacketFrame", d.frame, "PacketLen", len(d.data), "LastPacketFrame", latestFrameAudioInfo.frame, "LastPacketLen", latestFrameAudioInfo.samples)
 			return pcmData, errors.New("demo audio packet out of order")
 		}
 
 		longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
-		pcmData = append(pcmData, FramedSlice[int]{d.frame, pcmIntBuf})
+		pcmData = append(pcmData, FramedSlice[int]{d.id, d.frame, pcmIntBuf})
 	}
-	slog.Info("PCM info", "LongestFrameDuration", longestFrameDuration)
+	slog.Info("PCM info", "steamid", frameData[0].id, "LongestFrameDuration", longestFrameDuration)
 	return
 }
 
