@@ -3,7 +3,6 @@ package main
 import (
 	"CS2VoiceData/decoder"
 	"bufio"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,12 +18,14 @@ import (
 type FramedSlice[T any] struct {
 	id    uint64
 	frame int
+	time  time.Duration
 	data  []T
 }
 
 type FrameAudioInfo struct {
 	id      uint64
 	frame   int
+	time    time.Duration
 	samples int
 }
 
@@ -96,7 +97,7 @@ func main() {
 	// Add a parser register for the VoiceData net message.
 	parser.RegisterNetMessageHandler(func(m *msgs2.CSVCMsg_VoiceData) {
 		// Print tick. m.Tick/GetTick always return 0 for this net msg
-		slog.Info("CSVCMsg_VoiceData", "Frame", parser.CurrentFrame(), "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "BytesEncoded", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
+		slog.Info("CSVCMsg_VoiceData", "Frame", parser.CurrentFrame(), "Time", parser.CurrentTime().String(), "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "BytesEncoded", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
 
 		// Get the users Steam ID 64.
 		steamId := m.GetXuid()
@@ -106,8 +107,9 @@ func main() {
 		format = m.Audio.Format.String()
 		// todo: find out if we should sync against server tick (parser.GameState().IngameTick()) or against demo frame
 		currentFrame := parser.CurrentFrame()
+		currentTime := parser.CurrentTime()
 		// currentFrame := parser.GameState().IngameTick()
-		rawAudioMap[steamId] = append(rawAudioMap[steamId], FramedSlice[byte]{id: steamId, frame: currentFrame, data: m.Audio.VoiceData})
+		rawAudioMap[steamId] = append(rawAudioMap[steamId], FramedSlice[byte]{id: steamId, frame: currentFrame, time: currentTime, data: m.Audio.VoiceData})
 	})
 
 	// ParseHeader is deprecated (see https://github.com/markus-wa/demoinfocs-golang/discussions/568)
@@ -120,7 +122,7 @@ func main() {
 	// 	moreFrames, err = parser.ParseNextFrame()
 	// }
 	elapsed := time.Since(startTime)
-	slog.Warn(fmt.Sprintf("Time elapsed: %v", elapsed))
+	slog.Warn(fmt.Sprintf("Parsing took: %v", elapsed))
 
 	// For each users data, create a wav file containing their voice comms.
 	for playerId, voiceData := range rawAudioMap {
@@ -278,8 +280,9 @@ func opusToPcm(frameData []FramedSlice[byte]) (pcmData []FramedSlice[int], err e
 		return
 	}
 
-	latestFrameAudioInfo := FrameAudioInfo{frame: 0, samples: 0}
-	var longestFrameDuration int = 0
+	var lastAudioChunkFrame int = 0
+	var lastAudioChunkTimestamp time.Duration = 0
+	var samplesAccumulated int = 0
 
 	for _, d := range frameData {
 
@@ -297,38 +300,27 @@ func opusToPcm(frameData []FramedSlice[byte]) (pcmData []FramedSlice[int], err e
 			pcmIntBuf[i] = int(p * 2147483647)
 		}
 
-		fDiff := d.frame - latestFrameAudioInfo.frame
-		longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
-		if fDiff == 0 {
-			latestFrameAudioInfo.samples += len(pcmIntBuf)
-		} else if fDiff == 1 {
-			slog.Info("Frame stats", "Frame", latestFrameAudioInfo.frame, "Samples", latestFrameAudioInfo.samples, "steamid", d.id)
-			latestFrameAudioInfo.frame = d.frame
-			latestFrameAudioInfo.samples = len(pcmIntBuf)
+		// todo: insert silence
+		// TODO: if this works, convert it to using frame counts
+		// time.Duration is in nanoseconds, and samplerate is in Hz (cycles per second).
+		// 1/64 of a second is 0.015625 seconds, or 15,625,000 nanoseconds. It should be sufficient to just reference
+		// microseconds, where 1 microsecond = 1000 nanoseconds
+		// to convert Hz to cycles per nanosecond, divide Hz by 1,000,000,000. So 48,000 hz -> 0.000048 cycles/nanosec, or 0.048 cycles/microsecond
+		msgTimeDiff := d.time - lastAudioChunkTimestamp
+		samplesDuration := time.Duration(float64(samplesAccumulated) / (float64(48000) / float64(1000000000))) // in nanoseconds
+		silenceDuration := msgTimeDiff - samplesDuration
 
-		} else if fDiff > 1 {
-			slog.Info("Frame stats", "Frame", latestFrameAudioInfo.frame, "Samples", latestFrameAudioInfo.samples, "steamid", d.id)
-			// todo: insert silence
-			// this is just temporary
-			calculatedSilence := max(0, (samplesPerFrame-latestFrameAudioInfo.samples)+(samplesPerFrame*(fDiff-1)))
-
-			// pcmData = append(pcmData, FramedSlice[int]{id: d.id, frame: latestFrameAudioInfo.frame + 1, data: make([]int, 10)})
-
-			// todo: figure out how to precisely calculate this. we can use ints for now
-			slog.Info(fmt.Sprintf("Silence found between %d (len: %d samples) and %d - calculated duration: %d samples", latestFrameAudioInfo.frame, latestFrameAudioInfo.samples, d.frame, calculatedSilence), "steamid", d.id)
-
-			latestFrameAudioInfo.frame = d.frame
-			latestFrameAudioInfo.samples = len(pcmIntBuf)
-		} else {
-			// should not happen...
-			slog.Error("Error: Demo audio packet out of order!", "steamid", d.id, "PacketFrame", d.frame, "PacketLen", len(d.data), "LastPacketFrame", latestFrameAudioInfo.frame, "LastPacketLen", latestFrameAudioInfo.samples)
-			return pcmData, errors.New("demo audio packet out of order")
+		if silenceDuration > 0 {
+			samplesNeeded := int64(float64(silenceDuration) * (float64(48000) / float64(1000000000)))
+			slog.Info(fmt.Sprintf("Silence (%s) found between %d and %d - calculated duration: %d samples", silenceDuration.String(), lastAudioChunkFrame, d.frame, samplesNeeded), "steamid", d.id)
+			pcmData = append(pcmData, FramedSlice[int]{id: d.id, frame: lastAudioChunkFrame + 1, data: make([]int, samplesNeeded)})
+			lastAudioChunkTimestamp = d.time
+			lastAudioChunkFrame = d.frame
+			samplesAccumulated = len(d.data)
 		}
 
-		longestFrameDuration = max(longestFrameDuration, latestFrameAudioInfo.samples)
-		pcmData = append(pcmData, FramedSlice[int]{d.id, d.frame, pcmIntBuf})
+		pcmData = append(pcmData, FramedSlice[int]{d.id, d.frame, d.time, pcmIntBuf})
 	}
-	slog.Info("PCM info", "steamid", frameData[0].id, "LongestFrameDuration", longestFrameDuration)
 	return
 }
 

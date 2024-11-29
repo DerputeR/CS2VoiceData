@@ -1,1 +1,1 @@
-rm -r ./output; go run cs2-voice-data.go; ./log
+rm -rf ./output || true; go run cs2-voice-data.go; ./log
