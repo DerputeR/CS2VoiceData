@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -22,12 +23,12 @@ type FramedSlice[T any] struct {
 	data  []T
 }
 
-type FrameAudioInfo struct {
-	id      uint64
-	frame   int
-	time    time.Duration
-	samples int
-}
+// type FrameAudioInfo struct {
+// 	id      uint64
+// 	frame   int
+// 	time    time.Duration
+// 	samples int
+// }
 
 // default is 750 = 48000 hz / 64 fps
 var samplesPerFrame int = 750
@@ -97,18 +98,23 @@ func main() {
 	// Add a parser register for the VoiceData net message.
 	parser.RegisterNetMessageHandler(func(m *msgs2.CSVCMsg_VoiceData) {
 		// Print tick. m.Tick/GetTick always return 0 for this net msg
-		slog.Info("CSVCMsg_VoiceData", "Frame", parser.CurrentFrame(), "Time", parser.CurrentTime().String(), "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "BytesEncoded", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
+		// slog.Info("CSVCMsg_VoiceData", "Frame", parser.CurrentFrame(), "Time", parser.CurrentTime().String(), "SteamID", m.GetXuid(), "Mask", m.GetAudibleMask(), "Client", m.GetClient(), "Proximity", m.GetProximity(), "Passthrough", m.GetPassthrough(), slog.Group("Audio", "NumPackets", m.Audio.GetNumPackets(), "BytesEncoded", len(m.Audio.GetVoiceData()), "SequenceBytes", m.Audio.GetSequenceBytes(), "SectionNumber", m.Audio.GetSectionNumber(), "SampleRate", m.Audio.GetSampleRate(), "UncompressedSampleOffset", m.Audio.GetUncompressedSampleOffset(), "PacketOffsets", m.Audio.GetPacketOffsets(), "VoiceLevel", m.Audio.GetVoiceLevel()))
 
 		// Get the users Steam ID 64.
 		steamId := m.GetXuid()
+
+		// for now, skip the all except me
+		if steamId != 76561198077886900 {
+			return
+		}
 
 		// Append voice data to map
 		// todo: find out of it's possible this can be different per player
 		format = m.Audio.Format.String()
 		// todo: find out if we should sync against server tick (parser.GameState().IngameTick()) or against demo frame
-		currentFrame := parser.CurrentFrame()
+		// currentFrame := parser.CurrentFrame()
+		currentFrame := parser.GameState().IngameTick()
 		currentTime := parser.CurrentTime()
-		// currentFrame := parser.GameState().IngameTick()
 		rawAudioMap[steamId] = append(rawAudioMap[steamId], FramedSlice[byte]{id: steamId, frame: currentFrame, time: currentTime, data: m.Audio.VoiceData})
 	})
 
@@ -273,58 +279,74 @@ func opusToWav(data [][]byte, wavName string) (err error) {
 	return
 }
 
-// todo
-func opusToPcm(frameData []FramedSlice[byte]) (pcmData []FramedSlice[int], err error) {
+// todo: convert this to just using a plain old int array
+func opusToPcm(frameData []FramedSlice[byte]) (pcmData []int, err error) {
 	opusDecoder, err := decoder.NewDecoder(48000, 1)
 	if err != nil {
 		return
 	}
 
-	var lastAudioChunkFrame int = 0
-	var lastAudioChunkTimestamp time.Duration = 0
-	var samplesAccumulated int = 0
+	// give myself some lookahead time
+	lookaheadSamples := 16 * samplesPerFrame
+
+	var bufLength int = 16384 // 16384
+
+	// pre-populate the pcmData buffer with zeroes to compensate for start delay
+	var firstFrame int = frameData[0].frame
+	pcmData = make([]int, samplesPerFrame*firstFrame+lookaheadSamples+bufLength)
+
+	var prevFrame int = firstFrame
+	var bufStart int = len(pcmData) - bufLength - lookaheadSamples
+	var streamTail int = bufStart + bufLength + lookaheadSamples
+
+	// todo: see if there's some kind of "warmup" we should do
+	// i.e. let the "stream" fill in however many samples before we start "popping" from the head
+	// to our audio "buffer"
 
 	for _, d := range frameData {
+		if d.frame > prevFrame {
+			bufStart += samplesPerFrame * (d.frame - prevFrame)
+			if len(pcmData) < bufStart+bufLength-1 {
+				pcmData = append(pcmData, make([]int, samplesPerFrame*(d.frame-prevFrame))...)
+			}
+		}
 
-		pcm, err := decoder.Decode(opusDecoder, d.data)
+		pcmF32, err := decoder.Decode(opusDecoder, d.data)
 		if err != nil {
 			slog.Warn(err.Error())
 			continue
 		}
 
 		// ? should this be int32
-		pcmIntBuf := make([]int, len(pcm))
+		pcmInt := make([]int, len(pcmF32))
 
-		for i, p := range pcm {
+		for i, p := range pcmF32 {
 			// todo: use the go-audio transforms instead of manually mangling the samples up to int samples
-			pcmIntBuf[i] = int(p * 2147483647)
+			pcmInt[i] = int(p * 2147483647)
 		}
 
-		// todo: insert silence
-		// TODO: if this works, convert it to using frame counts
-		// time.Duration is in nanoseconds, and samplerate is in Hz (cycles per second).
-		// 1/64 of a second is 0.015625 seconds, or 15,625,000 nanoseconds. It should be sufficient to just reference
-		// microseconds, where 1 microsecond = 1000 nanoseconds
-		// to convert Hz to cycles per nanosecond, divide Hz by 1,000,000,000. So 48,000 hz -> 0.000048 cycles/nanosec, or 0.048 cycles/microsecond
-		msgTimeDiff := d.time - lastAudioChunkTimestamp
-		samplesDuration := time.Duration(float64(samplesAccumulated) / (float64(48000) / float64(1000000000))) // in nanoseconds
-		silenceDuration := msgTimeDiff - samplesDuration
-
-		if silenceDuration > 0 {
-			samplesNeeded := int64(float64(silenceDuration) * (float64(48000) / float64(1000000000)))
-			slog.Info(fmt.Sprintf("Silence (%s) found between %d and %d - calculated duration: %d samples", silenceDuration.String(), lastAudioChunkFrame, d.frame, samplesNeeded), "steamid", d.id)
-			pcmData = append(pcmData, FramedSlice[int]{id: d.id, frame: lastAudioChunkFrame + 1, data: make([]int, samplesNeeded)})
-			lastAudioChunkTimestamp = d.time
-			lastAudioChunkFrame = d.frame
-			samplesAccumulated = len(d.data)
+		var insertIndex int
+		if streamTail < bufStart {
+			insertIndex = bufStart + lookaheadSamples
+		} else {
+			insertIndex = streamTail
 		}
 
-		pcmData = append(pcmData, FramedSlice[int]{d.id, d.frame, d.time, pcmIntBuf})
+		// check if the data we're about to add would exceed the stream's current capacity. if so, extend it before calling replace
+		lenDiff := len(pcmInt) - len(pcmData[insertIndex:])
+		if lenDiff > 0 {
+			pcmData = append(pcmData, make([]int, lenDiff)...)
+		}
+		pcmData = slices.Replace(pcmData, insertIndex, insertIndex+len(pcmInt), pcmInt...)
+		streamTail = insertIndex + len(pcmInt)
+
+		prevFrame = d.frame
 	}
-	return
+	// discard the lookahead samples
+	return pcmData[lookaheadSamples:], nil
 }
 
-func writePcmToFile(pcmData []FramedSlice[int], wavName string) (err error) {
+func writePcmToFile(pcmData []int, wavName string) (err error) {
 	file, err := os.Create(wavName)
 	if err != nil {
 		return
@@ -334,13 +356,8 @@ func writePcmToFile(pcmData []FramedSlice[int], wavName string) (err error) {
 	enc := wav.NewEncoder(file, 48000, 32, 1, 1)
 	defer enc.Close()
 
-	var pcmBuffer []int
-	for _, d := range pcmData {
-		pcmBuffer = append(pcmBuffer, d.data...)
-	}
-
 	buffer := &audio.IntBuffer{
-		Data: pcmBuffer,
+		Data: pcmData,
 		Format: &audio.Format{
 			SampleRate:  48000,
 			NumChannels: 1,
