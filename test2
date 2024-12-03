@@ -1,0 +1,1 @@
+rm -rf ./output || true; go run cs2-voice-data.go -tags debugdemoinfocs -ldflags '-X github.com/markus-wa/demoinfocs-golang.debugUnhandledMessages=YES'; ./log

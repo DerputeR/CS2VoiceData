@@ -13,6 +13,7 @@ import (
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
 	dem "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
+	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
 	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/msgs2"
 )
 
@@ -33,7 +34,7 @@ type FramedSlice[T any] struct {
 // default is 750 = 48000 hz / 64 fps
 var samplesPerFrame int = 750
 
-var logLevel slog.Level = slog.LevelInfo
+var logLevel slog.Level = slog.LevelDebug
 
 func main() {
 	startTime := time.Now()
@@ -85,14 +86,51 @@ func main() {
 
 	parser := dem.NewParser(file)
 	var format string
+	
+	parser.RegisterNetMessageHandler(func(m *msgs2.))
+
+	parser.RegisterNetMessageHandler(func(m any) {
+		slog.Info(fmt.Sprintf("Net msg: %v", m))
+	})
 
 	parser.RegisterNetMessageHandler(func(m *msgs2.CNETMsg_Tick) {
-		slog.Debug(fmt.Sprintf("TICK: Tick %10d", m.Tick), "frame", parser.CurrentFrame(), "tick", parser.GameState().IngameTick(), "time", parser.CurrentTime().Seconds())
+		// slog.Debug(fmt.Sprintf("TICK: Tick %10d", m.Tick), "frame", parser.CurrentFrame(), "tick", parser.GameState().IngameTick(), "time", parser.CurrentTime().Seconds())
 		// fmt.Printf("TICK: Tick %10d (frame: %10d, tick: %10d, time: %f)\n", *m.Tick, parser.CurrentFrame(), parser.GameState().IngameTick(), parser.CurrentTime().Seconds())
 	})
 
 	parser.RegisterNetMessageHandler(func(m *msgs2.CDemoFileHeader) {
-		slog.Debug(m.String())
+		slog.Info(m.String())
+	})
+
+	parser.RegisterNetMessageHandler(func(m *msgs2.CSVCMsg_VoiceInit) {
+		slog.Info("Voice init msg received!", "Tick", parser.GameState().IngameTick())
+	})
+
+	parser.RegisterNetMessageHandler(func(m *msgs2.CMsgVoiceAudio) {
+		slog.Info("MsgVoiceAudio msg received!", "Tick", parser.GameState().IngameTick())
+	})
+
+	// parser.RegisterNetMessageHandler(func(m *msgs2.CUserMessageSendAudio) {
+	// 	slog.Debug("CUserMessageSendAudio received!", "Tick", parser.GameState().IngameTick())
+	// })
+
+	// parser.RegisterNetMessageHandler(func(m *msgs2.CCSUsrMsg_RawAudio) {
+	// 	slog.Debug("CCSUsrMsg_RawAudio received!", "Tick", parser.GameState().IngameTick(), "EntId", m.Entidx, "Duration", m.Duration, "File", m.VoiceFilename)
+	// })
+
+	// never runs (client side i think)
+	parser.RegisterNetMessageHandler(func(m *msgs2.CCLCMsg_VoiceData) {
+		slog.Info("Client voice data msg received!", "Tick", parser.GameState().IngameTick())
+	})
+
+	parser.RegisterEventHandler(func(e events.PlayerSound) {
+		if e.Player.SteamID64 == 76561198077886900 {
+			slog.Info("Player sound event", "Tick", parser.GameState().IngameTick(), "Duration", e.Duration)
+		}
+	})
+
+	parser.RegisterNetMessageHandler(func(m *msgs2.CSVCMsg_Sounds) {
+
 	})
 
 	// Add a parser register for the VoiceData net message.
@@ -114,6 +152,11 @@ func main() {
 		// todo: find out if we should sync against server tick (parser.GameState().IngameTick()) or against demo frame
 		// currentFrame := parser.CurrentFrame()
 		currentFrame := parser.GameState().IngameTick()
+
+		if currentFrame < 20463 || currentFrame > 20740 {
+			return
+		}
+
 		currentTime := parser.CurrentTime()
 		rawAudioMap[steamId] = append(rawAudioMap[steamId], FramedSlice[byte]{id: steamId, frame: currentFrame, time: currentTime, data: m.Audio.VoiceData})
 	})
